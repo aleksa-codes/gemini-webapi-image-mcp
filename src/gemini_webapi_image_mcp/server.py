@@ -385,13 +385,19 @@ async def _generate(
             elif getattr(response, "metadata", None):
                 conv_id = list(response.metadata[:3])
 
-        if not response.images:
+        from gemini_webapi.types import GeneratedImage
+
+        # Only true generations count: when Gemini declines, response.images
+        # may hold WebImage search results instead. Saving those as
+        # "generated" would be misleading, so filter strictly.
+        generated = [im for im in response.images if isinstance(im, GeneratedImage)]
+        if not generated:
             return response.text or "No images were generated. Try rephrasing your prompt."
 
         save_dir.mkdir(parents=True, exist_ok=True)
         saved = []
 
-        for i, image in enumerate(response.images):
+        for i, image in enumerate(generated):
             save_kwargs = {"verbose": False}
             # full_size (native RPC upscale) exists on GeneratedImage only;
             # other image types save at preview resolution.
