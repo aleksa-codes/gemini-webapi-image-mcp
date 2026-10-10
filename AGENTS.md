@@ -57,6 +57,12 @@ All source lives in `src/gemini_webapi_image_mcp/`:
 | `GEMINI_IMAGE_MODEL_ID` | Override model ID for image requests | `56fdd199312815e2` |
 | `GEMINI_OUTPUT_DIR` | Default directory for saved images | `~/Pictures/gemini/` |
 
+## Dependencies
+
+`gemini-webapi` (xob0t fork on GitHub, not PyPI), `mcp`, `browser-cookie3`, `orjson`, `curl-cffi`.
+
+> Evaluated switching to upstream `HanaokaYuzu/Gemini-API` 2.1.1: incompatible without a rewrite. It posts to `batchexecute` (request patches filter on `StreamGenerate`, so they'd silently die), has no `Model.from_name` / `parse_response_by_frame` / `_parse_generated_images` (patches would crash lifespan init), and uses different exceptions. Upstream is better long-term (native temp flag, native full-size, per-account model discovery) but adopting it needs a rewrite verified where image gen actually works. Do not retry blindly.
+
 ## License
 
 AGPL-3.0-or-later.
