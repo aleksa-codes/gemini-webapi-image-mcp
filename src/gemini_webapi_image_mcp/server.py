@@ -354,6 +354,7 @@ async def _generate(
                     return f"Error: File not found — {p}"
                 resolved_files.append(str(p))
 
+        chat = None
         async with _image_lock:
             t = _stage("acquired image lock", t0)
             global _image_mode
@@ -391,15 +392,19 @@ async def _generate(
         saved = []
 
         for i, image in enumerate(response.images):
+            save_kwargs = {"verbose": False}
+            # full_size (native RPC upscale) exists on GeneratedImage only;
+            # other image types save at preview resolution.
+            if type(image).__name__ == "GeneratedImage":
+                save_kwargs["full_size"] = not _SKIP_2X
             try:
-                # Native full-size fetch (RPC) with a hard per-image cap so a
-                # stalled CDN fetch can never hang the call forever.
+                # Hard per-image cap so a stalled CDN fetch can never hang
+                # the call forever.
                 filepath = await asyncio.wait_for(
                     image.save(
                         path=str(save_dir),
                         filename=f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{i}.png",
-                        verbose=False,
-                        full_size=not _SKIP_2X,
+                        **save_kwargs,
                     ),
                     timeout=DOWNLOAD_TIMEOUT,
                 )

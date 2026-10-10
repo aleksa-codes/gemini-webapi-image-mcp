@@ -64,7 +64,7 @@ All source lives in `src/gemini_webapi_image_mcp/`:
 
 > Migrated to upstream `HanaokaYuzu/Gemini-API` 2.x (was xob0t fork). The 2.x request/response layers differ, so the port was rewritten, not copied: request patching kept (model header, body params, temp flag, file fix), response/token/c8o8Fe machinery dropped (native parsing + native full-size RPC instead), exceptions remapped.
 >
-> Verified on VPS: tools register, client init + patch apply cleanly, error mapping works. NOT verified: actual image bytes — this VPS account returns API error 1096 for ALL generation (even unpatched plain-text requests), so it's account-level, not code. Bisect (NO_REMAP, NO_BODY, fully native text call) proved the patch innocent. First real image test must happen where generation works.
+> Verified on VPS: tools register, client init + patch apply cleanly, error mapping works. NOT verified: actual image bytes — this VPS account returns API error 1096 for ALL generation (even unpatched plain-text requests), so it's account-level, not code. Bisect (NO_REMAP, NO_BODY, fully native text call) proved the patch innocent. With fresh user cookies, generation reached parsing (4 images) then hit a save-kwarg bug (fixed, see save loop) before account throttling (1096) kicked in — final bytes-to-disk still unverified. First real image test must happen on an unthrottled account.
 >
 > Do not switch back to xob0t without reason: its request shape is what the old code assumed; the current code targets 2.x.
 
