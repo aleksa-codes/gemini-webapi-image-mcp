@@ -24,6 +24,39 @@ uv sync
 uv run gemini-image-mcp
 ```
 
+## Connect
+
+### OpenCode
+
+Add to `opencode.json` (no clone needed; needs SSH access to the private repo):
+
+```json
+{
+  "mcp": {
+    "gemini-image": {
+      "type": "local",
+      "command": [
+        "uvx",
+        "--with",
+        "gemini-webapi-image-mcp @ git+https://github.com/aleksa-codes/gemini-webapi-image-mcp.git",
+        "gemini-image-mcp"
+      ],
+      "enabled": true,
+      "environment": {
+        "GEMINI_PSID": "paste-your-PSID",
+        "GEMINI_PSIDTS": "paste-your-PSIDTS"
+      }
+    }
+  }
+}
+```
+
+### Claude Code / Claude Desktop
+
+```bash
+claude mcp add gemini-image -- uvx --with "gemini-webapi-image-mcp @ git+https://github.com/aleksa-codes/gemini-webapi-image-mcp.git" gemini-image-mcp -e GEMINI_PSID="..." -e GEMINI_PSIDTS="..."
+```
+
 ## Cookies
 
 No browser on the machine? Set env vars (this is the only auth path then):
@@ -43,4 +76,10 @@ With a logged-in Chrome present, cookies are read automatically. Refresh flow wh
 
 ## License
 
-AGPL-3.0-or-later (same as sources).
+AGPL-3.0-or-later (same as the sources it ports). In plain terms:
+
+- **Use it freely**, privately or commercially, modified or not. Running it for your own agents (even on a VPS) triggers no obligations.
+- **If you share a modified version** (publish a fork, or run it as a service others use), you must publish your modified source under the same license.
+- **You cannot** relicense it or derivatives as closed source.
+
+Keeping this repo private and unmodified-in-spirit means the license stays out of your way.
