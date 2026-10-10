@@ -24,6 +24,24 @@ uv sync
 uv run gemini-image-mcp
 ```
 
+## Configuration
+
+All settings are environment variables. Only the cookies are required (and only when no logged-in Chrome is present).
+
+| Variable | What it does | Default |
+|----------|--------------|---------|
+| `GEMINI_PSID` / `GEMINI_PSIDTS` | Login cookies. Skip if Chrome on this machine is logged into Gemini | auto from Chrome |
+| `GEMINI_OUTPUT_DIR` | Where images are saved | `~/Pictures/gemini/` |
+| `GEMINI_SKIP_2X` | Set `1` to skip 2x upscaling (faster, smaller images) | `0` (upscale on) |
+| `GEMINI_GEN_TIMEOUT` | Max seconds to wait for one generation before failing | `600` |
+| `GEMINI_DOWNLOAD_TIMEOUT` | Max seconds to wait when downloading a finished image | `60` |
+| `GEMINI_ACCOUNT_INDEX` | Which Google account to use when several are logged in (`0`, `1`, ...) | `0` |
+| `GEMINI_LANGUAGE` | Language hint sent with image requests | `en` |
+| `GEMINI_IMAGE_MODEL_ID` | Internal model ID for the fast image route. Only change if generations break after a Google update | `56fdd199312815e2` |
+| `GEMINI_NO_REMAP` | Set `1` to send the model as-is instead of remapping to the fast image route. Debugging only | `0` |
+| `GEMINI_DEBUG_TIMING` | Set `1` to log how long each stage takes. Debugging only | `0` |
+| `CHROME_COOKIE_FILE` | Custom Chrome cookie file path for auto-auth | Chrome default location |
+
 ## Connect
 
 ### OpenCode
