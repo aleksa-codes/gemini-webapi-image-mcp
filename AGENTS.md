@@ -53,6 +53,7 @@ All source lives in `src/gemini_webapi_image_mcp/`:
 | `GEMINI_DOWNLOAD_TIMEOUT` | Image download timeout (seconds) | `60` |
 | `GEMINI_SKIP_2X` | Set `1` to skip 2x upscale RPC | `0` |
 | `GEMINI_NO_REMAP` | Set `1` to skip model-ID remap | `0` |
+| `GEMINI_NO_BODY` | Set `1` to skip body-param injection (keeps header + temp). Diagnostic bisect only | `0` |
 | `GEMINI_DEBUG_TIMING` | Set `1` to log per-stage wall-time | `0` |
 | `GEMINI_IMAGE_MODEL_ID` | Override model ID for image requests | `56fdd199312815e2` |
 | `GEMINI_OUTPUT_DIR` | Default directory for saved images | `~/Pictures/gemini/` |
@@ -61,7 +62,11 @@ All source lives in `src/gemini_webapi_image_mcp/`:
 
 `gemini-webapi` (xob0t fork on GitHub, not PyPI), `mcp`, `browser-cookie3`, `orjson`, `curl-cffi`.
 
-> Evaluated switching to upstream `HanaokaYuzu/Gemini-API` 2.1.1: incompatible without a rewrite. It posts to `batchexecute` (request patches filter on `StreamGenerate`, so they'd silently die), has no `Model.from_name` / `parse_response_by_frame` / `_parse_generated_images` (patches would crash lifespan init), and uses different exceptions. Upstream is better long-term (native temp flag, native full-size, per-account model discovery) but adopting it needs a rewrite verified where image gen actually works. Do not retry blindly.
+> Migrated to upstream `HanaokaYuzu/Gemini-API` 2.x (was xob0t fork). The 2.x request/response layers differ, so the port was rewritten, not copied: request patching kept (model header, body params, temp flag, file fix), response/token/c8o8Fe machinery dropped (native parsing + native full-size RPC instead), exceptions remapped.
+>
+> Verified on VPS: tools register, client init + patch apply cleanly, error mapping works. NOT verified: actual image bytes — this VPS account returns API error 1096 for ALL generation (even unpatched plain-text requests), so it's account-level, not code. Bisect (NO_REMAP, NO_BODY, fully native text call) proved the patch innocent. First real image test must happen where generation works.
+>
+> Do not switch back to xob0t without reason: its request shape is what the old code assumed; the current code targets 2.x.
 
 ## License
 

@@ -39,6 +39,7 @@ All settings are environment variables. Only the cookies are required (and only 
 | `GEMINI_LANGUAGE` | Language hint sent with image requests | `en` |
 | `GEMINI_IMAGE_MODEL_ID` | Internal model ID for the fast image route. Only change if generations break after a Google update | `56fdd199312815e2` |
 | `GEMINI_NO_REMAP` | Set `1` to send the model as-is instead of remapping to the fast image route. Debugging only | `0` |
+| `GEMINI_NO_BODY` | Set `1` to skip body-param injection (keeps header + temp flag). Bisecting Google-side failures only | `0` |
 | `GEMINI_DEBUG_TIMING` | Set `1` to log how long each stage takes. Debugging only | `0` |
 | `CHROME_COOKIE_FILE` | Custom Chrome cookie file path for auto-auth | Chrome default location |
 
@@ -88,8 +89,8 @@ With a logged-in Chrome present, cookies are read automatically. Refresh flow wh
 
 ## Credits
 
-- Image pipeline, client patching, and cookie approach ported from [aleksa-codes/gemini-webapi-mcp](https://github.com/aleksa-codes/gemini-webapi-mcp) (fork of [AndyShaman/gemini-webapi-mcp](https://github.com/AndyShaman/gemini-webapi-mcp)).
-- Web client library: [xob0t/Gemini-API](https://github.com/xob0t/Gemini-API) (`gemini-webapi`).
+- Request pipeline ported from [aleksa-codes/gemini-webapi-mcp](https://github.com/aleksa-codes/gemini-webapi-mcp) (fork of [AndyShaman/gemini-webapi-mcp](https://github.com/AndyShaman/gemini-webapi-mcp)), rewritten for the 2.x library.
+- Web client library: [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API) (`gemini-webapi`).
 - Prompting guide adapted from the same fork.
 
 ## License

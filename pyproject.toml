@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "MCP server for Gemini image generation/editing via browser cookies (unofficial web client, no API keys)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     { name = "Aleksa" },
 ]
@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "gemini-webapi @ git+https://github.com/xob0t/Gemini-API.git",
+    "gemini-webapi @ git+https://github.com/HanaokaYuzu/Gemini-API.git",
     "mcp>=1.8,<2",
     "browser-cookie3>=0.20",
     "orjson>=3.9",
