@@ -1,0 +1,904 @@
+"""
+MCP Server for Gemini image generation/editing via browser cookies.
+
+Unofficial web client (NOT the official Gemini API): authenticates with
+__Secure-1PSID / __Secure-1PSIDTS cookies, same as a logged-in browser.
+No API keys. Free, but cookies expire and must be refreshed periodically.
+
+Image-only: generate, edit, reset, status. No chat.
+"""
+
+import asyncio
+import json
+import logging
+import os
+import random
+import re
+import string
+import sys
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from mcp.server.fastmcp import FastMCP, Context
+
+# ---------------------------------------------------------------------------
+# Logging (stderr only — stdout reserved for MCP stdio transport)
+# ---------------------------------------------------------------------------
+logger = logging.getLogger("gemini_image_mcp")
+logger.addHandler(logging.StreamHandler(sys.stderr))
+logger.setLevel(logging.INFO)
+logger.propagate = False  # own stderr handler only — root propagation double-prints
+
+# gemini_webapi logs cookie/init progress through loguru at DEBUG; keep it
+# quiet unless someone debugs the library itself.
+try:
+    from loguru import logger as _loguru
+
+    _loguru.disable("gemini_webapi")
+except ImportError:
+    pass
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+_env_output_dir = os.environ.get("GEMINI_OUTPUT_DIR")
+IMAGES_DIR = Path(_env_output_dir).expanduser().resolve() if _env_output_dir else Path.home() / "Pictures" / "gemini"
+DEFAULT_MODEL = "gemini-3.6-flash"
+
+# Models not yet in gemini_webapi.constants.Model. Keyed by model name; the value
+# is the full "x-goog-ext-525001261-jspb" request header captured from a real
+# StreamGenerate request. The trailing uppercase UUID is a per-request nonce —
+# Google ignores its value, so a static copy works.
+_EXTRA_MODELS = {
+    "gemini-3.5-flash-lite": (
+        '[1,null,null,null,"cf41b0e0dd7d53e5",null,null,0,[4,5,6,8],'
+        'null,null,1,null,null,6,1,"FB9551F9-257B-4901-BB87-00DF412FE5CC"]'
+    ),
+    "gemini-3.6-flash": (
+        '[1,null,null,null,"fbb127bbb056c959",null,null,0,[4,5,6,8],'
+        'null,null,1,null,null,1,1,"FB9551F9-257B-4901-BB87-00DF412FE5CC"]'
+    ),
+    "gemini-3.1-pro": (
+        '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4,5,6,8],'
+        'null,null,1,null,null,3,1,"EA125BD5-EEA0-437E-9464-82D9B1FBEA98"]'
+    ),
+}
+
+# Hard ceiling for a single generation call (seconds). Override with GEMINI_GEN_TIMEOUT.
+GEN_TIMEOUT = float(os.environ.get("GEMINI_GEN_TIMEOUT", "600"))
+# Per-network-op timeout for image download (seconds). Override with GEMINI_DOWNLOAD_TIMEOUT.
+DOWNLOAD_TIMEOUT = float(os.environ.get("GEMINI_DOWNLOAD_TIMEOUT", "60"))
+
+# Optional stage timing: set GEMINI_DEBUG_TIMING=1 to log per-stage wall-time.
+_DEBUG_TIMING = os.environ.get("GEMINI_DEBUG_TIMING") == "1"
+# c8o8Fe 2x-upscale RPC gives full-resolution downloads. Costs ~20s/image extra;
+# disable with GEMINI_SKIP_2X=1.
+_SKIP_2X = os.environ.get("GEMINI_SKIP_2X", "0") != "0"
+# Skip the model-id remap + version bump in patched_request. Set to "1" to send
+# the requested model as-is.
+_NO_REMAP = os.environ.get("GEMINI_NO_REMAP") == "1"
+
+# Natural-language aspect hints appended to the prompt (Nano Banana follows
+# phrasing better than parameters). 1:1 is the model default, no hint needed.
+_ASPECT_HINTS = {
+    "1:1": "",
+    "16:9": "wide landscape 16:9 aspect ratio",
+    "9:16": "tall portrait 9:16 aspect ratio",
+    "4:3": "4:3 aspect ratio",
+    "3:2": "3:2 aspect ratio",
+}
+
+
+def _stage(label: str, t0: float) -> float:
+    """Log elapsed seconds since t0 for a named stage when timing is enabled."""
+    import time
+    now = time.monotonic()
+    if _DEBUG_TIMING:
+        logger.info("[timing] %s: %.2fs", label, now - t0)
+    return now
+
+# ---------------------------------------------------------------------------
+# Cookie resolution: env vars → browser-cookie3 → error
+# ---------------------------------------------------------------------------
+
+def _resolve_cookies() -> tuple[str, str]:
+    """Resolve Gemini auth cookies with clear priority chain.
+
+    1. Environment variables GEMINI_PSID / GEMINI_PSIDTS (explicit override).
+    2. Chrome browser cookies via browser-cookie3 (automatic).
+    3. RuntimeError with actionable instructions.
+
+    Returns (psid, psidts). psidts may be empty.
+    Cookie values are never logged.
+    """
+    # --- Priority 1: explicit env vars ---
+    psid = os.environ.get("GEMINI_PSID", "")
+    psidts = os.environ.get("GEMINI_PSIDTS", "")
+    if psid:
+        logger.info("Using Gemini cookies from environment variables")
+        return psid, psidts
+
+    # --- Priority 2: Chrome browser cookies ---
+    try:
+        import browser_cookie3
+
+        cookie_file = os.environ.get("CHROME_COOKIE_FILE") or None
+        cj = browser_cookie3.chrome(domain_name=".google.com", cookie_file=cookie_file)
+        for cookie in cj:
+            if cookie.name == "__Secure-1PSID" and cookie.value:
+                psid = cookie.value
+            elif cookie.name == "__Secure-1PSIDTS" and cookie.value:
+                psidts = cookie.value
+        if psid:
+            logger.info("Using Gemini cookies from Chrome browser")
+            return psid, psidts
+        logger.warning("browser-cookie3: no __Secure-1PSID cookie found in Chrome")
+    except ImportError:
+        logger.warning("browser-cookie3 not installed — cannot read cookies from Chrome")
+    except Exception as exc:
+        logger.warning("browser-cookie3: failed to read Chrome cookies — %s", type(exc).__name__)
+
+    # --- Nothing worked ---
+    raise RuntimeError(
+        "Gemini cookies not found. Options:\n"
+        "  1. Log into gemini.google.com in Chrome and install browser-cookie3, or\n"
+        "  2. Set GEMINI_PSID (and optionally GEMINI_PSIDTS) environment variables."
+    )
+
+
+def _make_gen_id() -> str:
+    """Generate a client-side gen_id for c8o8Fe RPC (16-char repeating pattern)."""
+    base = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return (base * 3)[:16]
+
+
+# ---------------------------------------------------------------------------
+# Lifespan: initialise GeminiClient once, reuse across all tool calls
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def app_lifespan(server):
+    from gemini_webapi import GeminiClient
+
+    psid, psidts = _resolve_cookies()
+
+    account_index = int(os.environ.get("GEMINI_ACCOUNT_INDEX", "0"))
+    client = GeminiClient(secure_1psid=psid, secure_1psidts=psidts or None, account_index=account_index)
+    if account_index:
+        logger.info("Using Google account index: %d", account_index)
+    await client.init(timeout=300, watchdog_timeout=45, auto_close=False, auto_refresh=True)
+    _patch_client(client)
+
+    yield {"gemini_client": client}
+
+    await client.close()
+
+
+mcp = FastMCP("gemini-webapi-image-mcp", lifespan=app_lifespan)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get_client(ctx: Context):
+    return ctx.request_context.lifespan_context["gemini_client"]
+
+
+_image_mode = False
+_temporary_mode = False
+_image_lock = asyncio.Lock()
+
+# Populated by _patched_parse hook during StreamGenerate response parsing.
+_image_tokens: dict[str, str] = {}   # preview_url -> download_token
+_last_metadata: list = []             # [cid, rid, rcid, ...] from last response
+
+
+def _register_custom_models():
+    """Teach gemini_webapi about models missing from its Model enum."""
+    from gemini_webapi.constants import Model
+
+    orig_from_name = Model.from_name
+
+    def patched_from_name(name):
+        header = _EXTRA_MODELS.get(name)
+        if header:
+            custom = Model.UNSPECIFIED
+            custom.model_name = name
+            custom.model_header = {"x-goog-ext-525001261-jspb": header}
+            return custom
+        if name.startswith("gemini-3.0"):
+            raise ValueError(f"Model '{name}' is retired. Use: {', '.join(sorted(_EXTRA_MODELS))}")
+        return orig_from_name(name)
+
+    Model.from_name = patched_from_name
+
+
+def _patch_client(gemini_client):
+    """Patch GeminiClient for image generation and 2x download support.
+
+    1. Override model ID in header (Google rotates IDs periodically).
+    2. Add browser-compatible body params and extra headers during image generation.
+    3. Intercept response parsing to capture image download tokens for c8o8Fe RPC.
+    """
+    _register_custom_models()
+
+    # Model id used by the browser for fast image generation (Flash).
+    # Override via GEMINI_IMAGE_MODEL_ID if Google rotates it.
+    _IMAGE_MODEL_ID = os.environ.get("GEMINI_IMAGE_MODEL_ID", "56fdd199312815e2")
+    # Capability flags array — the browser sends [4,5,6,8].
+    _IMAGE_MODEL_CAPS = "[4,5,6,8]"
+
+    # Browser-compatible body params (indices in inner_req_list), captured from a
+    # real browser image-generation request. These route the request to the fast
+    # image path.
+    _BROWSER_PARAMS = {
+        1: [os.environ.get("GEMINI_LANGUAGE", "en")],
+        6: [1],
+        7: 1,
+        10: 1,
+        11: 0,
+        17: [[1]],
+        18: 0,
+        27: 1,
+        30: [4],
+        41: [1],
+        53: 0,
+        61: [],
+        68: 2,
+    }
+
+    http = gemini_client.client  # curl_cffi.AsyncSession
+    _orig_request = http.request
+
+    async def patched_request(method, url, **kwargs):
+        global _image_mode, _temporary_mode
+
+        # --- Temporary generation: inject flag into any StreamGenerate request ---
+        if _temporary_mode and method == "POST" and "StreamGenerate" in str(url):
+            data = kwargs.get("data")
+            if isinstance(data, dict) and "f.req" in data:
+                try:
+                    outer = json.loads(data["f.req"])
+                    inner = json.loads(outer[1])
+                    if len(inner) > 45:
+                        inner[45] = 1
+                    else:
+                        inner.extend([None] * (46 - len(inner)))
+                        inner[45] = 1
+                    outer[1] = json.dumps(inner)
+                    data["f.req"] = json.dumps(outer)
+                    kwargs["data"] = data
+                except Exception as _e:
+                    if _DEBUG_TIMING:
+                        logger.warning("[req] temp patch failed: %s", _e)
+
+        # --- Image generation: browser-compatible params ---
+        if method == "POST" and "StreamGenerate" in str(url) and _image_mode:
+            headers = kwargs.get("headers") or {}
+
+            # Per-request UUID — the browser uses an UPPERCASE uuid, embedded in
+            # both jspb headers AND inner[59], all three must match.
+            req_uuid = str(uuid.uuid4()).upper()
+
+            # Replace the model header with the exact browser shape for fast image
+            # generation. Browser: [1,null,null,null,"<id>",null,null,0,[4,5,6,8],null,null,2,null,null,1,1,"<UUID>"]
+            if not _NO_REMAP:
+                headers["x-goog-ext-525001261-jspb"] = (
+                    '[1,null,null,null,"' + _IMAGE_MODEL_ID + '",null,null,0,'
+                    + _IMAGE_MODEL_CAPS + ',null,null,2,null,null,1,1,"' + req_uuid + '"]'
+                )
+
+            headers["x-goog-ext-73010989-jspb"] = "[0]"
+            headers["x-goog-ext-73010990-jspb"] = "[0,0,0]"
+            headers["x-goog-ext-525005358-jspb"] = json.dumps([req_uuid, 1])
+
+            kwargs["headers"] = headers
+
+            # Inject browser-compatible body params into f.req
+            data = kwargs.get("data")
+            if isinstance(data, dict) and "f.req" in data:
+                try:
+                    outer = json.loads(data["f.req"])
+                    inner = json.loads(outer[1])
+                    # Force the captured browser values (overwrite, not only-if-None:
+                    # the library pre-sets some of these to slow-path values).
+                    for idx, val in _BROWSER_PARAMS.items():
+                        if idx < len(inner):
+                            inner[idx] = val
+                    # Sync UUID with header
+                    inner[59] = req_uuid
+
+                    # Fix file_data format:
+                    # Library:  [[[url], "name"]]
+                    # Browser:  [[[url, 1, null, "mime"], "name", null*6, [0]]]
+                    file_data = inner[0][3] if isinstance(inner[0], list) and len(inner[0]) > 3 else None
+                    if file_data and isinstance(file_data, list):
+                        _MIME_MAP = {
+                            ".png": "image/png", ".jpg": "image/jpeg",
+                            ".jpeg": "image/jpeg", ".webp": "image/webp",
+                            ".gif": "image/gif", ".bmp": "image/bmp",
+                        }
+                        for fd in file_data:
+                            if isinstance(fd, list) and len(fd) == 2:
+                                url_arr, filename = fd[0], fd[1]
+                                if isinstance(url_arr, list) and len(url_arr) == 1:
+                                    ext = Path(filename).suffix.lower() if isinstance(filename, str) else ""
+                                    mime = _MIME_MAP.get(ext, "image/png")
+                                    fd[0] = [url_arr[0], 1, None, mime]
+                                    fd.extend([None, None, None, None, None, None, [0]])
+
+                    outer[1] = json.dumps(inner)
+                    data["f.req"] = json.dumps(outer)
+                    kwargs["data"] = data
+                    if _DEBUG_TIMING:
+                        logger.info("[req] model_hdr=%s", headers.get("x-goog-ext-525001261-jspb"))
+                        logger.info("[req] inner idx 6=%s 7=%s 17=%s 30=%s 68=%s len=%d",
+                                    inner[6] if len(inner) > 6 else "?",
+                                    inner[7] if len(inner) > 7 else "?",
+                                    inner[17] if len(inner) > 17 else "?",
+                                    inner[30] if len(inner) > 30 else "?",
+                                    inner[68] if len(inner) > 68 else "?", len(inner))
+                except Exception as _e:
+                    if _DEBUG_TIMING:
+                        logger.warning("[req] patch failed: %s", _e)
+
+        return await _orig_request(method, url, **kwargs)
+
+    http.request = patched_request
+
+    # --- Patch _parse_generated_images for new dict-based response format ---
+    # Google changed response structure: [12][7][0] (list) -> [12][0]["8"] (dict).
+    import gemini_webapi.client as _gwc
+    from gemini_webapi.utils import (
+        get_nested_value,
+        parse_response_by_frame as _orig_parse,
+    )
+    from gemini_webapi.types import GeneratedImage
+    import orjson as _json
+
+    _orig_parse_images = _gwc._parse_generated_images
+
+    def _patched_parse_images(candidate_data, proxy=None, cookies=None, account_index=0, session_kwargs=None):
+        # Try original parser first (old list-based format)
+        result = _orig_parse_images(candidate_data, proxy, cookies, account_index, session_kwargs)
+        if result:
+            return result
+
+        # Fallback: new dict-based format at [12][0]["8"]
+        val12 = get_nested_value(candidate_data, [12])
+        if not isinstance(val12, list) or not val12:
+            return result
+        entry = val12[0]
+        if not isinstance(entry, dict) or "8" not in entry:
+            return result
+        generated_images = []
+        for gen_img_data in entry["8"]:
+            # Structure: [[[null, null, null, [null, 1, "filename.png", "url", ...], ...], ...]]
+            url_arr = get_nested_value(gen_img_data, [0, 0, 3])
+            if isinstance(url_arr, list) and len(url_arr) >= 4:
+                url = url_arr[3]
+                title = url_arr[2] or "[Generated Image]"
+                token = url_arr[4] if len(url_arr) > 4 else None
+                if url and isinstance(url, str) and url.startswith("http"):
+                    if token:
+                        _image_tokens[url] = token
+                    # Force a download timeout so image.save()'s CDN fetch of the
+                    # full-size (=s0) image can never hang the call forever.
+                    sk = dict(session_kwargs or {})
+                    sk.setdefault("timeout", DOWNLOAD_TIMEOUT)
+                    generated_images.append(
+                        GeneratedImage(
+                            url=url,
+                            title="[Generated Image]",
+                            alt="",
+                            proxy=proxy,
+                            cookies=cookies,
+                            account_index=account_index,
+                            session_kwargs=sk,
+                        )
+                    )
+        if generated_images:
+            logger.info("Parsed %d images from new dict-based response format", len(generated_images))
+        return generated_images
+
+    _gwc._parse_generated_images = _patched_parse_images
+
+    # --- Wrap parse_response_by_frame to capture image download tokens ---
+    def _patched_parse(buffer):
+        parts, remaining = _orig_parse(buffer)
+        for part in parts:
+            inner_json_str = get_nested_value(part, [2])
+            if not inner_json_str:
+                continue
+            try:
+                part_json = _json.loads(inner_json_str)
+                # Capture conversation metadata (cid/rid)
+                m_data = get_nested_value(part_json, [1])
+                if isinstance(m_data, list) and len(m_data) >= 2 and m_data[0]:
+                    if len(_last_metadata) >= 3:
+                        _last_metadata[0] = m_data[0]
+                        _last_metadata[1] = m_data[1]
+                    else:
+                        _last_metadata.clear()
+                        _last_metadata.extend(m_data)
+                # Capture image download tokens + rcid from candidates
+                candidates = get_nested_value(part_json, [4], [])
+                for cand in candidates:
+                    rcid = get_nested_value(cand, [0])
+                    if rcid and isinstance(rcid, str) and rcid.startswith("rc_"):
+                        if len(_last_metadata) >= 2:
+                            if len(_last_metadata) == 2:
+                                _last_metadata.append(rcid)
+                            else:
+                                _last_metadata[2] = rcid
+                    # Old format: [12][7][0]
+                    for gid in get_nested_value(cand, [12, 7, 0], []):
+                        url = get_nested_value(gid, [0, 3, 3])
+                        token = get_nested_value(gid, [0, 3, 5])
+                        if url and token:
+                            _image_tokens[url] = token
+                    # New dict format: [12][0]["8"]
+                    val12 = get_nested_value(cand, [12])
+                    if isinstance(val12, list) and val12 and isinstance(val12[0], dict):
+                        for gid in val12[0].get("8", []):
+                            url_arr = get_nested_value(gid, [0, 0, 3])
+                            if isinstance(url_arr, list) and len(url_arr) >= 5:
+                                url, token = url_arr[3], url_arr[4]
+                                if url and token:
+                                    _image_tokens[url] = token
+            except Exception:
+                pass
+        return parts, remaining
+
+    _gwc.parse_response_by_frame = _patched_parse
+    logger.info("Patched GeminiClient with browser-compatible parameters")
+
+
+def _handle_error(e: Exception) -> str:
+    from gemini_webapi import AuthError, APIError, RequestTimeoutError
+
+    if isinstance(e, AuthError):
+        return (
+            "Error: Authentication failed. Cookies may have expired. "
+            "Refresh GEMINI_PSID / GEMINI_PSIDTS from a logged-in Chrome session, then call reset."
+        )
+    if isinstance(e, RequestTimeoutError):
+        return "Error: Request timed out. Try again or simplify the prompt."
+    if isinstance(e, APIError):
+        return f"Error: Gemini API error — {e}"
+    return f"Error: {type(e).__name__} — {e}"
+
+
+async def _fetch_download_url(client, token: str, prompt: str, metadata: list, image_index: int = 0) -> str | None:
+    """Call c8o8Fe RPC to get a high-resolution (2x) download URL for a generated image."""
+    import orjson as _json
+    from gemini_webapi.constants import Endpoint
+    from gemini_webapi.utils import parse_response_by_frame, get_nested_value
+
+    cid = metadata[0] if metadata else None
+    rid = metadata[1] if len(metadata) > 1 else None
+    rcid = metadata[2] if len(metadata) > 2 else None
+    if not (rid and rcid and cid):
+        logger.warning("c8o8Fe skipped: missing metadata (cid/rid/rcid)")
+        return None
+
+    gen_id = _make_gen_id()
+    inner_payload = _json.dumps([
+        [
+            [None, None, None, [None, None, None, None, None, token]],
+            [f"http://googleusercontent.com/image_generation_content/{image_index}", image_index],
+            None,
+            [19, prompt],
+            None, None, None, None, None,
+            gen_id,
+        ],
+        [rid, rcid, cid, None, gen_id],
+        1, 0, 1,
+    ]).decode("utf-8")
+
+    outer_payload = _json.dumps(
+        [[["c8o8Fe", inner_payload, None, "generic"]]]
+    ).decode("utf-8")
+
+    params: dict = {
+        "rpcids": "c8o8Fe",
+        "_reqid": client._reqid,
+        "rt": "c",
+        "source-path": Endpoint.get_source_path(client.account_index),
+    }
+    client._reqid += 100000
+    if client.build_label:
+        params["bl"] = client.build_label
+    if client.session_id:
+        params["f.sid"] = client.session_id
+
+    try:
+        resp = await client.client.post(
+            Endpoint.get_batch_exec_url(client.account_index),
+            params=params,
+            data={"at": client.access_token, "f.req": outer_payload},
+            headers={
+                "x-goog-ext-525001261-jspb": "[1,null,null,null,null,null,null,0,[4,4]]",
+                "x-goog-ext-73010989-jspb": "[0]",
+            },
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            logger.warning("c8o8Fe returned status %d", resp.status_code)
+            return None
+
+        text = resp.text
+        if text.startswith(")]}'"):
+            text = text[4:].lstrip()
+        parts, _ = parse_response_by_frame(text)
+        for part in parts:
+            if isinstance(part, list) and len(part) > 2 and part[1] == "c8o8Fe":
+                inner_str = part[2]
+                if inner_str and isinstance(inner_str, str):
+                    inner = _json.loads(inner_str)
+                    if isinstance(inner, list) and inner:
+                        return inner[0]
+        logger.warning("c8o8Fe: no download URL in response (%d parts parsed)", len(parts))
+    except Exception as exc:
+        logger.warning("c8o8Fe failed: %s", exc)
+    return None
+
+
+def _with_aspect(prompt: str, aspect_ratio: Optional[str]) -> str:
+    """Append a natural-language aspect hint (Nano Banana follows phrasing, not params)."""
+    if not aspect_ratio:
+        return prompt
+    hint = _ASPECT_HINTS.get(aspect_ratio.strip(), aspect_ratio.strip())
+    if not hint:
+        return prompt
+    return f"{prompt.rstrip()} ({hint})."
+
+
+async def _generate(
+    client,
+    prompt: str,
+    files: Optional[list[str]],
+    conversation_id: Optional[list[str]],
+    model: Optional[str],
+    output_dir: Optional[str],
+) -> str:
+    """Shared generate/edit core. Returns JSON with saved paths + conversation_id."""
+    import time
+    t0 = time.monotonic()
+    try:
+        # Resolve output directory: per-call param > IMAGES_DIR (respects GEMINI_OUTPUT_DIR)
+        save_dir = Path(output_dir).expanduser().resolve() if output_dir else IMAGES_DIR
+
+        # Validate input files
+        resolved_files = []
+        if files:
+            for f in files:
+                p = Path(f).expanduser().resolve()
+                if not p.exists():
+                    return f"Error: File not found — {p}"
+                resolved_files.append(str(p))
+
+        chat = None
+        async with _image_lock:
+            t = _stage("acquired image lock", t0)
+            global _image_mode
+            _image_mode = True
+            try:
+                if conversation_id:
+                    chat = client.start_chat(
+                        metadata=conversation_id,
+                        model=model or DEFAULT_MODEL,
+                    )
+                    gen_coro = chat.send_message(prompt, files=resolved_files or None)
+                else:
+                    kwargs = {"model": model or DEFAULT_MODEL}
+                    if resolved_files:
+                        kwargs["files"] = resolved_files
+                    gen_coro = client.generate_content(prompt, **kwargs)
+                # Hard cap: never let the library's stall-retry loop run for
+                # minutes when Gemini throttles the account. Fail fast instead.
+                response = await asyncio.wait_for(gen_coro, timeout=GEN_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning("generate_content exceeded %.0fs cap — aborting", GEN_TIMEOUT)
+                return (
+                    f"Error: Gemini did not return an image within {GEN_TIMEOUT:.0f}s "
+                    "via the library (the browser is usually faster). Try again."
+                )
+            finally:
+                _image_mode = False
+            _stage("generate_content returned", t)
+
+        if not response.images:
+            return response.text or "No images were generated. Try rephrasing your prompt."
+
+        # --- Try to get 2x download URLs via c8o8Fe RPC ---
+        if _last_metadata and _last_metadata[0]:
+            metadata = list(_last_metadata)
+        elif chat:
+            metadata = [chat.cid or "", chat.rid or "", chat.rcid or ""]
+        else:
+            metadata = []
+        download_urls: dict[int, str] = {}
+        if not _SKIP_2X:
+            for i, image in enumerate(response.images):
+                token = _image_tokens.pop(image.url, None)
+                if token and metadata:
+                    logger.info("Requesting 2x download URL for image %d...", i)
+                    dl_url = await _fetch_download_url(client, token, prompt, metadata, i)
+                    if dl_url:
+                        download_urls[i] = dl_url
+                        logger.info("Got 2x download URL for image %d", i)
+        _image_tokens.clear()  # clean up any leftover tokens
+        t = _stage("c8o8Fe (2x url) done", t)
+
+        save_dir.mkdir(parents=True, exist_ok=True)
+        saved = []
+
+        for i, image in enumerate(response.images):
+            # Ensure a download timeout even if this image came from the
+            # original (non-patched) parser, where session_kwargs is empty.
+            try:
+                if "timeout" not in getattr(image, "session_kwargs", {}):
+                    image.session_kwargs = {**getattr(image, "session_kwargs", {}),
+                                            "timeout": DOWNLOAD_TIMEOUT}
+            except Exception:
+                pass
+            # Use 2x upscale URL from c8o8Fe if available
+            has_upscale = i in download_urls
+            if has_upscale:
+                # Use c8o8Fe 2x URL with =s0 for full resolution (not =s2048 which downscales)
+                image.url = re.sub(r"=[^/]*$", "", download_urls[i]) + "=s0"
+            elif re.search(r"=s\d+(-[a-z0-9]+)*$", image.url):
+                # googleusercontent URL with an explicit =sNNNN size suffix: bump to
+                # =s0 for full resolution. gg-dl token URLs have no such suffix and
+                # reject =s0 with HTTP 400, so we leave those untouched.
+                image.url = re.sub(r"=s\d+(-[a-z0-9]+)*$", "=s0", image.url)
+
+            try:
+                # full_size=False only when c8o8Fe already gave us a URL with =s0;
+                # otherwise library's =s2048 is needed for full-size preview download.
+                filepath = await image.save(
+                    path=str(save_dir),
+                    filename=f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{i}.png",
+                    verbose=False,
+                    full_size=not has_upscale,
+                )
+            except Exception as save_err:
+                logger.warning("Image save failed for %d: %s", i, save_err)
+                continue
+            _stage(f"download+save image {i}", t)
+
+            if not filepath:
+                continue
+
+            title = getattr(image, "title", None) or f"image_{i}"
+            saved.append({"title": title, "path": filepath, "dir": str(save_dir)})
+
+        # For response: prefer chat metadata (clean cid/rid/rcid), fall back to raw
+        if chat:
+            conv_id = [chat.cid or "", chat.rid or "", chat.rcid or ""]
+        else:
+            conv_id = metadata[:3] if metadata and metadata[0] else None
+        result = {
+            "text": response.text or "",
+            "images_saved_to": str(save_dir),
+            "images": saved,
+            "conversation_id": conv_id,
+        }
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    except Exception as e:
+        return _handle_error(e)
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool(
+    name="generate_image",
+    annotations={
+        "title": "Generate Image",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def generate_image(
+    prompt: str,
+    ctx: Context,
+    aspect_ratio: Optional[str] = None,
+    conversation_id: Optional[list[str]] = None,
+    temporary: bool = True,
+    output_dir: Optional[str] = None,
+) -> str:
+    """Generate an image from a text description with Nano Banana.
+
+    Pass conversation_id from a previous call to keep refining in the same
+    thread (e.g. "make it more dramatic"). You can also use a cid from the
+    Gemini web URL (gemini.google.com/app/{cid}).
+
+    Images save to ~/Pictures/gemini/ by default (GEMINI_OUTPUT_DIR env var
+    or output_dir param override).
+
+    Args:
+        prompt: Natural-language scene description (see skill prompting guide).
+        aspect_ratio: 1:1 (default), 16:9, 9:16, 4:3, or 3:2.
+        conversation_id: Optional [cid, rid, rcid] from a previous response.
+        temporary: Default True — not saved to Gemini history. Set False to persist.
+        output_dir: Directory for saved images. Supports ~ and relative paths.
+
+    Returns:
+        JSON with saved image paths and conversation_id for continuation.
+    """
+    global _temporary_mode
+    _temporary_mode = temporary
+    try:
+        client = _get_client(ctx)
+        return await _generate(
+            client,
+            _with_aspect(prompt, aspect_ratio),
+            files=None,
+            conversation_id=conversation_id,
+            model=None,
+            output_dir=output_dir,
+        )
+    finally:
+        _temporary_mode = False
+
+
+@mcp.tool(
+    name="edit_image",
+    annotations={
+        "title": "Edit Image",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def edit_image(
+    paths: list[str],
+    prompt: str,
+    ctx: Context,
+    aspect_ratio: Optional[str] = None,
+    conversation_id: Optional[list[str]] = None,
+    temporary: bool = True,
+    output_dir: Optional[str] = None,
+) -> str:
+    """Edit/transform existing image(s) with Nano Banana.
+
+    Args:
+        paths: Local image file paths (at least one). Multiple allowed.
+        prompt: Editing instruction (e.g. 'change the sky to sunset, keep
+                everything else exactly the same').
+        aspect_ratio: 1:1 (default), 16:9, 9:16, 4:3, or 3:2.
+        conversation_id: Optional [cid, rid, rcid] from a previous response.
+        temporary: Default True — not saved to Gemini history. Set False to persist.
+        output_dir: Directory for saved images. Supports ~ and relative paths.
+
+    Returns:
+        JSON with saved image paths and conversation_id for continuation.
+    """
+    global _temporary_mode
+    _temporary_mode = temporary
+    try:
+        if not paths:
+            return "Error: edit_image needs at least one image path."
+        client = _get_client(ctx)
+        return await _generate(
+            client,
+            _with_aspect(prompt, aspect_ratio),
+            files=paths,
+            conversation_id=conversation_id,
+            model=None,
+            output_dir=output_dir,
+        )
+    finally:
+        _temporary_mode = False
+
+
+@mcp.tool(
+    name="status",
+    annotations={
+        "title": "Cookie Status",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def status(ctx: Context) -> str:
+    """Check whether the Gemini cookies are valid.
+
+    Probes a fresh client with a short timeout — does not disturb the
+    shared session. If this reports expired, refresh GEMINI_PSID /
+    GEMINI_PSIDTS from a logged-in Chrome (devtools → Application →
+    Cookies → gemini.google.com → __Secure-1PSID and __Secure-1PSIDTS).
+
+    Returns:
+        JSON with ok flag, auth source, and config summary.
+    """
+    from gemini_webapi import GeminiClient, AuthError
+
+    try:
+        psid, psidts = _resolve_cookies()
+    except RuntimeError as e:
+        return json.dumps({"ok": False, "reason": "missing", "detail": str(e)})
+
+    source = "env" if os.environ.get("GEMINI_PSID") else "chrome"
+    probe = None
+    try:
+        probe = GeminiClient(secure_1psid=psid, secure_1psidts=psidts or None)
+        await asyncio.wait_for(
+            probe.init(timeout=60, watchdog_timeout=15, auto_close=False, auto_refresh=False),
+            timeout=90,
+        )
+        return json.dumps({
+            "ok": True,
+            "source": source,
+            "cookies": {"psid": f"{len(psid)} chars", "psidts": f"{len(psidts)} chars"},
+            "output_dir": str(IMAGES_DIR),
+        })
+    except AuthError:
+        return json.dumps({
+            "ok": False,
+            "reason": "expired",
+            "detail": (
+                "Cookies rejected by Google. Refresh from a logged-in Chrome: "
+                "devtools → Application → Cookies → https://gemini.google.com → "
+                "copy __Secure-1PSID and __Secure-1PSIDTS into GEMINI_PSID / GEMINI_PSIDTS."
+            ),
+        })
+    except Exception as e:
+        return json.dumps({"ok": False, "reason": "probe_failed", "detail": f"{type(e).__name__}: {e}"})
+    finally:
+        if probe is not None:
+            try:
+                await probe.close()
+            except Exception:
+                pass
+
+
+@mcp.tool(
+    name="reset",
+    annotations={
+        "title": "Reset Client",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def reset(ctx: Context) -> str:
+    """Re-initialise the client (refresh cookies, clear state).
+
+    Use after updating GEMINI_PSID / GEMINI_PSIDTS, or when calls fail
+    with authentication errors.
+
+    Returns:
+        Confirmation message or error.
+    """
+    try:
+        from gemini_webapi import GeminiClient
+
+        old = _get_client(ctx)
+        await old.close()
+
+        psid, psidts = _resolve_cookies()
+
+        account_index = int(os.environ.get("GEMINI_ACCOUNT_INDEX", "0"))
+        new_client = GeminiClient(
+            secure_1psid=psid, secure_1psidts=psidts or None, account_index=account_index
+        )
+        await new_client.init(timeout=300, watchdog_timeout=45, auto_close=False, auto_refresh=True)
+        _patch_client(new_client)
+
+        ctx.request_context.lifespan_context["gemini_client"] = new_client
+        return "Client re-initialised with fresh cookies."
+    except Exception as e:
+        return _handle_error(e)

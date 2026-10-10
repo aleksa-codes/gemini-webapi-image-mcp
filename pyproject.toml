@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gemini-webapi-image-mcp"
+version = "0.1.0"
+description = "MCP server for Gemini image generation/editing via browser cookies (unofficial web client, no API keys)"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.10"
+authors = [
+    { name = "Aleksa" },
+]
+keywords = ["mcp", "mcp-server", "google-gemini", "nano-banana", "image-generation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "gemini-webapi @ git+https://github.com/xob0t/Gemini-API.git",
+    "mcp>=1.8,<2",
+    "browser-cookie3>=0.20",
+    "orjson>=3.9",
+    "curl-cffi>=0.14.0",
+]
+
+[project.scripts]
+gemini-image-mcp = "gemini_webapi_image_mcp:main"
+
+[project.urls]
+Homepage = "https://github.com/aleksa-codes/gemini-webapi-image-mcp"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gemini_webapi_image_mcp"]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.0",
+]
