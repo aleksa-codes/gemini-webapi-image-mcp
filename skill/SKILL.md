@@ -1,5 +1,5 @@
 ---
-name: gemini-image-mcp
+name: gemini-image
 description: Generate and edit images with Gemini Nano Banana via unofficial web-client cookies. Use when the user asks for image generation, image editing, or visual concepts. No API keys, free, temporary by default.
 ---
 
