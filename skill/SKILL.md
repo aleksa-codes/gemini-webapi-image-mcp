@@ -1,6 +1,6 @@
 ---
 name: gemini-image
-description: Generate and edit images with Gemini Nano Banana via unofficial web-client cookies. Use when the user asks for image generation, image editing, or visual concepts. No API keys, free, temporary by default.
+description: 'Use this skill when the user asks for image generation, image editing, visual concepts, or assets, or wants to iterate on an existing image. Generates and edits images with Gemini Nano Banana via unofficial web-client cookies (no API keys, free, temporary by default). Triggers on: generate image, edit image, Nano Banana, Gemini image, make a picture, create an image, image prompt, aspect ratio, conversation_id. Tools: generate_image, edit_image, status, reset. Invoke through execute with bracket notation: tools["gemini-image"]["generate_image"]({...}).'
 ---
 
 # Gemini Image MCP
