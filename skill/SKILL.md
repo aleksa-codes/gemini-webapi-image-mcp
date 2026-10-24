@@ -7,6 +7,19 @@ description: Generate and edit images with Gemini Nano Banana via unofficial web
 
 Image generation and editing through `gemini.google.com` (unofficial web client, cookie auth — not the official API).
 
+## Calling the tools
+
+These are **MCP tools**, not skill functions. The skill only provides guidance; it does not generate images. Invoke them through `execute` using **bracket notation** — the namespace contains a hyphen, so dot access (`tools.gemini-image...`) throws `Unknown identifier`:
+
+```js
+await tools["gemini-image"]["generate_image"]({
+  prompt: "A cinematic wide shot...",
+  aspect_ratio: "16:9"
+})
+```
+
+Same pattern for `edit_image`, `status`, and `reset`.
+
 ## Tools
 
 - `generate_image(prompt, aspect_ratio?, conversation_id?, temporary=True, output_dir?)` — new image from text.
