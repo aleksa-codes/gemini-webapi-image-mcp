@@ -32,6 +32,6 @@ Same pattern for `edit_image`, `status`, and `reset`.
 - **Always use `temporary=True`** (the default) unless the user explicitly asks to keep history.
 - **Prompt well**: read `references/image-prompting.md` before generating. Natural sentences, not tag soup. Quote text to render. Prefer editing over re-rolling.
 - **Aspect ratio**: pass `aspect_ratio` (`1:1`, `16:9`, `9:16`, `4:3`, `3:2`) instead of writing it into the prompt by hand.
-- **Iterate**: responses include `conversation_id` — pass it back for refinements ("more dramatic", "add rain") rather than starting over.
+- **Iterate**: to refine Gemini's previous output, call `generate_image` with the returned `conversation_id` and an editing prompt ("more dramatic", "add rain"). Prefer this over re-uploading the saved image. Use `edit_image` with `paths` for external images or when the original conversation is unavailable.
 - **Output dir**: default `~/Pictures/gemini/`. For project assets, pass an explicit `output_dir`.
 - **On auth errors**: run `status()`, follow its refresh instructions, then `reset()`. Never ask the user for passwords; cookies come from their own logged-in Chrome.

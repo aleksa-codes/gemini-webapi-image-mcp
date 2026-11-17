@@ -1,104 +1,119 @@
 # gemini-webapi-image-mcp
 
-MCP server for Gemini **image generation and editing only**, via an unofficial web client (browser cookies). No API keys. Free.
+Generate and edit images with Gemini Nano Banana through MCP. Uses the Gemini website with your Google session, not the official API. No API key required.
 
-> **Not the official Gemini API.** This talks to `gemini.google.com` the same way a logged-in browser does, using `__Secure-1PSID` / `__Secure-1PSIDTS` cookies. Google may rotate or invalidate cookies at any time; when calls start failing with auth errors, refresh the cookies (see below).
+## Authentication
 
-## Tools
+The server needs a signed-in Google session. **You usually do not need to copy or configure cookies on your own computer.**
 
-| Tool | What |
-|------|------|
-| `generate_image` | New image from a text prompt (Nano Banana) |
-| `edit_image` | Transform existing image(s) from a prompt |
-| `status` | Validate cookies without disturbing the session |
-| `reset` | Re-initialise the client with fresh cookies |
+| Where the MCP server runs | What to do |
+|---------------------------|------------|
+| On your computer, with a readable Chrome profile | Sign in at [gemini.google.com](https://gemini.google.com) in Chrome. Cookies are read automatically. Leave `GEMINI_PSID` and `GEMINI_PSIDTS` unset. |
+| On a VPS, in a container, or without access to a signed-in Chrome profile | Provide cookies manually using the [fallback below](#manual-cookies). |
 
-`generate_image` and `edit_image` default to `temporary=True` (nothing saved to Gemini history). Pass `temporary=False` to persist generations to the account. Both return JSON with saved paths plus `conversation_id` for iterative refinement ("make it more dramatic").
+What matters is where the **MCP process** runs, not where you open your editor. If automatic Chrome access fails, manual cookies are also an option.
 
-Images save to `~/Pictures/gemini/` by default (`GEMINI_OUTPUT_DIR` env var or per-call `output_dir` overrides). 2x upscaled downloads via `c8o8Fe` RPC unless `GEMINI_SKIP_2X=1`.
+## Connect
 
-## Setup
+Requires [uv](https://docs.astral.sh/uv/) and GitHub access to this repository.
 
-```bash
+### OpenCode
+
+Register for all projects (omit `--global` for this project only):
+
+```sh
+opencode mcp add gemini-image --global -- uvx --with "gemini-webapi-image-mcp @ git+https://github.com/aleksa-codes/gemini-webapi-image-mcp.git" gemini-image-mcp
+```
+
+No clone or cookie settings are needed with automatic Chrome authentication. Other MCP clients can use the same `uvx` command and arguments as a local **stdio** server.
+
+<details>
+<summary>Run from a local checkout</summary>
+
+From the repository directory:
+
+```sh
 uv sync
 uv run gemini-image-mcp
 ```
 
-## Configuration
+In an MCP client, use `uv --directory /absolute/path/to/gemini-webapi-image-mcp run gemini-image-mcp`.
 
-All settings are environment variables. Only the cookies are required (and only when no logged-in Chrome is present).
+</details>
 
-| Variable | What it does | Default |
-|----------|--------------|---------|
-| `GEMINI_PSID` / `GEMINI_PSIDTS` | Login cookies. Skip if Chrome on this machine is logged into Gemini | auto from Chrome |
-| `GEMINI_OUTPUT_DIR` | Where images are saved | `~/Pictures/gemini/` |
-| `GEMINI_SKIP_2X` | Set `1` to skip 2x upscaling (faster, smaller images) | `0` (upscale on) |
-| `GEMINI_GEN_TIMEOUT` | Max seconds to wait for one generation before failing | `600` |
-| `GEMINI_DOWNLOAD_TIMEOUT` | Max seconds to wait when downloading a finished image | `60` |
-| `GEMINI_ACCOUNT_INDEX` | Which Google account to use when several are logged in (`0`, `1`, ...) | `0` |
-| `GEMINI_LANGUAGE` | Language hint sent with image requests | `en` |
-| `GEMINI_IMAGE_MODEL_ID` | Internal model ID for the fast image route. Only change if generations break after a Google update | `56fdd199312815e2` |
-| `GEMINI_NO_REMAP` | Set `1` to send the model as-is instead of remapping to the fast image route. Debugging only | `0` |
-| `GEMINI_NO_BODY` | Set `1` to skip body-param injection (keeps header + temp flag). Bisecting Google-side failures only | `0` |
-| `GEMINI_DEBUG_TIMING` | Set `1` to log how long each stage takes. Debugging only | `0` |
-| `CHROME_COOKIE_FILE` | Custom Chrome cookie file path for auto-auth | Chrome default location |
+## Manual cookies
 
-## Connect
+**Skip this section if automatic Chrome authentication works.**
 
-### OpenCode
+1. Sign in at `gemini.google.com` in Chrome.
+2. Open DevTools, then **Application > Cookies > https://gemini.google.com**.
+3. Copy `__Secure-1PSID` and, preferably, `__Secure-1PSIDTS`.
+4. Pass them to the MCP process as `GEMINI_PSID` and `GEMINI_PSIDTS`. The second value is optional but recommended.
 
-Add to `opencode.json` (no clone needed; needs SSH access to the private repo):
+For a server launched from your shell:
 
-```json
-{
-  "mcp": {
-    "gemini-image": {
-      "type": "local",
-      "command": [
-        "uvx",
-        "--with",
-        "gemini-webapi-image-mcp @ git+https://github.com/aleksa-codes/gemini-webapi-image-mcp.git",
-        "gemini-image-mcp"
-      ],
-      "enabled": true,
-      "environment": {
-        "GEMINI_PSID": "paste-your-PSID",
-        "GEMINI_PSIDTS": "paste-your-PSIDTS"
-      }
-    }
-  }
-}
+```sh
+export GEMINI_PSID="your __Secure-1PSID value"
+export GEMINI_PSIDTS="your __Secure-1PSIDTS value"
 ```
 
-### Claude Code / Claude Desktop
+For an editor-managed server, use the client's environment settings. In OpenCode, add an `environment` object to the `gemini-image` entry with `GEMINI_PSID` and `GEMINI_PSIDTS`, preferably referencing secrets as `{env:GEMINI_PSID}` and `{env:GEMINI_PSIDTS}`. The referenced variables must be available to OpenCode itself.
 
-```bash
-claude mcp add gemini-image -- uvx --with "gemini-webapi-image-mcp @ git+https://github.com/aleksa-codes/gemini-webapi-image-mcp.git" gemini-image-mcp -e GEMINI_PSID="..." -e GEMINI_PSIDTS="..."
-```
+Manual values take priority over Chrome. To return to automatic authentication, remove them. Cookies are session credentials: never commit or share them. If they expire, replace the values supplied to the MCP process and reconnect the server.
 
-## Cookies
+## Tools
 
-No browser on the machine? Set env vars (this is the only auth path then):
+| Tool | Use |
+|------|-----|
+| `generate_image` | Create an image, or refine a previous generation using its `conversation_id`. |
+| `edit_image` | Edit local images supplied through `paths`. At least one path is required. |
+| `status` | Check authentication without disturbing the shared session. |
+| `reset` | Re-initialise the client and re-read cookies. |
 
-```bash
-export GEMINI_PSID="..."
-export GEMINI_PSIDTS="..."   # optional but recommended
-```
+Both image tools accept `aspect_ratio`, `output_dir`, and `temporary` and return JSON with saved image paths and a `conversation_id`.
 
-With a logged-in Chrome present, cookies are read automatically. Refresh flow when `status` reports expired: Chrome devtools → Application → Cookies → `https://gemini.google.com` → copy `__Secure-1PSID` and `__Secure-1PSIDTS` → update env → call `reset`. Takes about a minute.
+- **Refinements:** pass the returned `conversation_id` and an editing prompt to `generate_image`. Prefer this over re-uploading the saved image. Use `edit_image` for external images or when the original conversation is unavailable.
+- **Output:** images save to `~/Pictures/gemini/`. Downloads request full-size images by default; use `output_dir` to save elsewhere.
+- **History:** `temporary=True` by default. Use `temporary=False` only when you want the conversation saved to Gemini history.
 
-## Credits
+Agent guidance and prompting tips are in [`skill/SKILL.md`](skill/SKILL.md).
 
-- Request pipeline ported from [aleksa-codes/gemini-webapi-mcp](https://github.com/aleksa-codes/gemini-webapi-mcp) (fork of [AndyShaman/gemini-webapi-mcp](https://github.com/AndyShaman/gemini-webapi-mcp)), rewritten for the 2.x library.
-- Web client library: [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API) (`gemini-webapi`).
-- Prompting guide adapted from the same fork.
+## Optional settings
 
-## License
+No environment variables are required when automatic Chrome authentication works. These only override defaults.
 
-AGPL-3.0-or-later (same as the sources it ports). In plain terms:
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `GEMINI_OUTPUT_DIR` | `~/Pictures/gemini/` | Default save directory. Per-call `output_dir` takes priority. |
+| `GEMINI_ACCOUNT_INDEX` | `0` | Google account index when several accounts are signed in. |
+| `GEMINI_LANGUAGE` | `en` | Language hint for image requests. |
+| `GEMINI_SKIP_2X` | `0` | Set `1` to download previews instead of requesting full-size images. |
+| `GEMINI_GEN_TIMEOUT` | `600` | Generation timeout in seconds. |
+| `GEMINI_DOWNLOAD_TIMEOUT` | `60` | Per-image download timeout in seconds. |
+| `CHROME_COOKIE_FILE` | Chrome default | Custom cookie file for automatic authentication. |
 
-- **Use it freely**, privately or commercially, modified or not. Running it for your own agents (even on a VPS) triggers no obligations.
-- **If you share a modified version** (publish a fork, or run it as a service others use), you must publish your modified source under the same license.
-- **You cannot** relicense it or derivatives as closed source.
+<details>
+<summary>Debug settings</summary>
 
-Keeping this repo private and unmodified-in-spirit means the license stays out of your way.
+Leave these unset unless diagnosing a problem.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `GEMINI_IMAGE_MODEL_ID` | `56fdd199312815e2` | Override the internal fast-image model ID if Google rotates it. |
+| `GEMINI_NO_REMAP` | `0` | Set `1` to disable the model-ID override. |
+| `GEMINI_NO_BODY` | `0` | Set `1` to skip browser body parameters, keeping header and temporary-mode patching. |
+| `GEMINI_DEBUG_TIMING` | `0` | Set `1` to log stage timings. |
+
+</details>
+
+## Troubleshooting
+
+- **Authentication fails:** call `status`. With automatic authentication, sign in again in Chrome and call `reset`. With manual authentication, replace the supplied cookie values and reconnect the server.
+- **"Are you signed in?" or error 1096:** update older server versions. Chrome cookie selection now accepts only `.google.com`, excluding country domains such as `.google.com.bd`. This fix does not change manual cookies or resolve every account-side failure.
+- **Generation is throttled or blocked:** wait before retrying. Fresh cookies do not necessarily fix account or regional restrictions.
+
+## Credits and license
+
+Image pipeline and prompting guide adapted from [aleksa-codes/gemini-webapi-mcp](https://github.com/aleksa-codes/gemini-webapi-mcp), a fork of [AndyShaman/gemini-webapi-mcp](https://github.com/AndyShaman/gemini-webapi-mcp). The request layer was rewritten for [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API) 2.x.
+
+[AGPL-3.0-or-later](LICENSE).
